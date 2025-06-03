@@ -8,14 +8,10 @@ from visualization import animate_coverage, plot_coverage_overlay
 from config import simulation_mode, satellites
 
 def filter_satellites(satellites, mode):
-    if mode.lower() == 'modis':
-        return {k: v for k, v in satellites.items() if 'modis' in k.lower()}
-    elif mode.lower() == 'worldview-3':
-        return {k: v for k, v in satellites.items() if 'worldview' in k.lower()}
-    else:
-        return satellites
+    return satellites
 
 if __name__ == "__main__":
+    import numpy as np
     # Filter satellites based on simulation_mode
     selected_sats = filter_satellites(satellites, simulation_mode)
     # Propagate orbits and calculate FOVs
@@ -24,4 +20,4 @@ if __name__ == "__main__":
     animate_coverage(satellites_with_tracks, sky_datetime_objects)
     # Plot static coverage overlay at the end
     plot_coverage_overlay(satellites_with_tracks)
-    print("\nSimulation and visualization complete. Check the output video file and coverage plot in your folder.") 
+    print("\nSimulation and visualization complete. Check the output video file and coverage plot in your folder.")

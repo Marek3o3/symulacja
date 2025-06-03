@@ -21,6 +21,9 @@ from config import (
     output_video_filename,
     latitude_limit,
 )
+import numpy as np
+import csv
+from config import time_step_seconds
 
 
 def plot_static(satellites, sky_datetime_objects):
@@ -208,6 +211,34 @@ def animate_coverage(satellites, sky_datetime_objects):
                 return 'land'
         return 'ocean'
 
+    from shapely.geometry import Point
+    from matplotlib.patches import Circle
+    import matplotlib.patheffects as PathEffects
+    
+    # Zasięg stacji bazowej w stopniach (przybliżenie, bo 1 stopień ~ 111 km)
+    STATION_RADIUS_KM = 2935
+    EARTH_RADIUS_KM = 6371
+    
+    # Funkcja pomocnicza do rysowania okręgu o promieniu 900 km na mapie
+    def plot_station_circle(ax, lat, lon, radius_km, **kwargs):
+        # Przelicz promień na stopnie szerokości geograficznej (przybliżenie)
+        radius_deg = (radius_km / 111.32)
+        circle = plt.Circle((lon, lat), radius_deg, transform=ccrs.PlateCarree(), fill=False, **kwargs)
+        ax.add_patch(circle)
+
+    TOTAL_DATA_TB = 45.0
+    TRANSMISSION_RATE_Mbps = 500
+    TRANSMISSION_RATE_MBps = TRANSMISSION_RATE_Mbps / 8 * 1e6 / 1e6  # MB/s
+    TRANSMISSION_RATE_TBps = TRANSMISSION_RATE_MBps / 1e6  # TB/s
+    data_left_tb = [TOTAL_DATA_TB]  # mutable for closure
+    last_transmit_frame = [None]  # to avoid double counting in one frame
+
+    # Licznik czasu w zasięgu: {(sat, stacja): liczba_kroków}
+    in_range_counter = {}
+    for sat_name in satellites:
+        for st_name in reception_stations:
+            in_range_counter[(sat_name, st_name)] = 0
+
     def animate(frame):
         nonlocal day_land, day_ocean
         ax.clear()
@@ -286,6 +317,45 @@ def animate_coverage(satellites, sky_datetime_objects):
                     transform=ccrs.Geodetic(), color=st['color'], fontsize=8,
                     zorder=7, path_effects=[withStroke(linewidth=1.5, foreground='white')])
 
+        # Rysuj okręgi zasięgu stacji bazowych
+        for st_name, st_info in reception_stations.items():
+            plot_station_circle(ax, st_info['lat'], st_info['lon'], STATION_RADIUS_KM, color=st_info['color'], linestyle='--', linewidth=2, alpha=0.5, zorder=5)
+            ax.plot(st_info['lon'], st_info['lat'], marker=st_info['marker'], color=st_info['color'], markersize=10, transform=ccrs.Geodetic(), linestyle='', zorder=6)
+            ax.text(st_info['lon']+0.5, st_info['lat']+0.5, st_name, transform=ccrs.Geodetic(), color=st_info['color'], fontsize=9, zorder=7, path_effects=[PathEffects.withStroke(linewidth=2, foreground='white')])
+
+        # Sprawdzaj, czy satelita jest w zasięgu którejś stacji
+        transmitting = False
+        transmitting_pairs = set()
+        for sat_name, params in satellites.items():
+            sat_lat = params['latitudes'][frame]
+            sat_lon = params['longitudes'][frame]
+            for st_name, st_info in reception_stations.items():
+                lat1, lon1 = np.radians(sat_lat), np.radians(sat_lon)
+                lat2, lon2 = np.radians(st_info['lat']), np.radians(st_info['lon'])
+                dlat = lat2 - lat1
+                dlon = lon2 - lon1
+                a = np.sin(dlat/2)**2 + np.cos(lat1)*np.cos(lat2)*np.sin(dlon/2)**2
+                c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+                distance_km = EARTH_RADIUS_KM * c
+                if distance_km <= STATION_RADIUS_KM:
+                    ax.plot([st_info['lon'], sat_lon], [st_info['lat'], sat_lat], color='orange', linewidth=2, linestyle='-', transform=ccrs.Geodetic(), zorder=8)
+                    ax.text((st_info['lon']+sat_lon)/2, (st_info['lat']+sat_lat)/2, f"Transmisja: 300 Mbit/s", color='orange', fontsize=9, zorder=9, transform=ccrs.Geodetic(), path_effects=[PathEffects.withStroke(linewidth=2, foreground='white')])
+                    transmitting_pairs.add((sat_name, st_name))
+                    in_range_counter[(sat_name, st_name)] += 1
+        # Poprawne sumowanie przesłanych danych: tylko raz na krok, jeśli jakakolwiek para nadaje
+        if len(transmitting_pairs) > 0 and data_left_tb[0] > 0:
+            from config import time_step_seconds
+            # 300 Mbit/s * time_step_seconds = ilość Mbit przesłanych w tym kroku
+            transmitted_tb = (TRANSMISSION_RATE_Mbps * time_step_seconds) / 8 / 1e6  # TB (Mbit->MB->TB)
+            data_left_tb[0] = max(0, data_left_tb[0] - transmitted_tb)
+
+        # Wyświetl ilość pozostałych danych
+        ax.text(
+            0.5, -0.16,
+            f"Pozostało do przesłania: {data_left_tb[0]:.2f} TB / 45.00 TB",
+            transform=ax.transAxes, ha='center', va='top', fontsize=13, color='black', fontweight='bold',
+        )
+
         # display counters under map
         ax.text(
             0.5, -0.1,
@@ -300,6 +370,33 @@ def animate_coverage(satellites, sky_datetime_objects):
     writer = FFMpegWriter(fps=animation_fps, metadata=dict(artist='Satellite Simulator'), bitrate=animation_bitrate)
     anim.save(output_video_filename, writer=writer)
     plt.close(fig)
+    # Po zakończeniu animacji zapisz sumaryczny czas transmisji (gdy przynajmniej jedna satelita była w zasięgu dowolnej stacji)
+    total_transmit_steps = 0
+    for frame in range(num_steps):
+        transmitting = False
+        for sat_name, params in satellites.items():
+            sat_lat = params['latitudes'][frame]
+            sat_lon = params['longitudes'][frame]
+            for st_name, st_info in reception_stations.items():
+                lat1, lon1 = np.radians(sat_lat), np.radians(sat_lon)
+                lat2, lon2 = np.radians(st_info['lat']), np.radians(st_info['lon'])
+                dlat = lat2 - lat1
+                dlon = lon2 - lon1
+                a = np.sin(dlat/2)**2 + np.cos(lat1)*np.cos(lat2)*np.sin(dlon/2)**2
+                c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+                distance_km = EARTH_RADIUS_KM * c
+                if distance_km <= STATION_RADIUS_KM:
+                    transmitting = True
+                    break
+            if transmitting:
+                break
+        if transmitting:
+            total_transmit_steps += 1
+    total_transmit_seconds = total_transmit_steps * time_step_seconds
+    with open('czas_w_zasiegu.csv', 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['Sumaryczny_czas_transmisji_s'])
+        writer.writerow([total_transmit_seconds])
 
 
 def animate_modis_only(satellites, sky_datetime_objects, output_filename="modis_animation.mp4"):
@@ -373,4 +470,4 @@ def animate_modis_only(satellites, sky_datetime_objects, output_filename="modis_
     except Exception as e:
         print(f"\nError saving animation: {e}")
         print("Please ensure FFMpeg is installed and in your system's PATH.")
-    plt.close(fig) 
+    plt.close(fig)
